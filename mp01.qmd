@@ -1,0 +1,528 @@
+---
+title: "Mini #01 - New York City's Taxpayer Spending (CATS)"
+---
+
+This project analyzes New York City’s payroll to identify salary disparities between senior officials and rank-and-file employees.
+
+Acquiring Payroll Data
+
+```{r}
+if(!file.exists("data/mp01/nyc_payroll_export.csv")){
+    dir.create("data/mp01", showWarnings=FALSE, recursive=TRUE)
+    
+    ENDPOINT <- "https://data.cityofnewyork.us/resource/k397-673e.json"
+    
+    if(!require("httr2")) install.packages("httr2")
+    library(httr2)
+    
+    if(!require("jsonlite")) install.packages("jsonlite")
+    library(jsonlite)
+    
+    if(!require("dplyr")) install.packages("dplyr")
+    library(dplyr)
+    
+    if(!require("readr")) install.packages("readr")
+    library(readr)
+    
+    BATCH_SIZE <- 50000
+    OFFSET     <- 0
+    END_OF_EXPORT <- FALSE
+    ALL_DATA <- list()
+    
+    while(!END_OF_EXPORT){
+        cat("Requesting items", OFFSET, "to", BATCH_SIZE + OFFSET, "\n")
+        
+        req <- request(ENDPOINT) |>
+                  req_url_query(`$limit`  = BATCH_SIZE, 
+                                `$offset` = OFFSET)
+        
+        resp <- req_perform(req)
+        
+        batch_data <- fromJSON(resp_body_string(resp))
+          
+        ALL_DATA <- c(ALL_DATA, list(batch_data))
+        
+        if(NROW(batch_data) != BATCH_SIZE){
+            END_OF_EXPORT <- TRUE
+            
+            cat("End of Data Export Reached\n")
+        } else {
+            OFFSET <- OFFSET + BATCH_SIZE
+        }
+    }
+    
+    ALL_DATA <- bind_rows(ALL_DATA)
+    
+    cat("Data export complete:", NROW(ALL_DATA), "rows and", NCOL(ALL_DATA), "columns.")
+    
+    write_csv(ALL_DATA, "data/mp01/nyc_payroll_export.csv")
+}
+```
+
+```{r}
+library(readr)
+nyc_payroll <- read_csv("data/mp01/nyc_payroll_export.csv")
+```
+
+```{r}
+library(tidyverse)
+library(dplyr)
+library(stringr)
+glimpse(nyc_payroll)
+```
+
+
+
+Modify String Columns
+
+```{r}
+nyc_payroll <- nyc_payroll %>%
+  mutate(across(c(agency_start_date, last_name, first_name, 
+                  "work_location_borough", "title_description", "leave_status_as_of_june_30"), 
+                str_to_title))
+```
+
+## Identifying individual Records
+
+```{r}
+library(dplyr)
+```
+
+Filter for Eric L. Adamns
+
+```{r}
+eric_adams <- nyc_payroll %>%
+  filter(first_name == "Eric", `last_name` == "Adams") %>%
+  arrange(desc(`fiscal_year`))  # Sort by most recent year first
+```
+
+Creating a Summary Table
+
+```{r}
+eric_summary <- eric_adams %>%
+  group_by(`fiscal_year`, `agency_name`, `title_description`) %>%
+  summarize(
+    Total_Salary = sum(`regular_gross_paid`, na.rm = TRUE),  # Adjust if column name differs
+    .groups = "drop"
+  ) %>%
+  rename(
+    Year = `fiscal_year`,
+    Agency = `agency_name`,
+    Position = `title_description`
+  ) %>%
+  arrange(desc(Year))  # Keep latest years at the top
+```
+
+## Now, Let's creat an interactive table using DT
+
+Following necessarie packages
+```{r}
+library(dplyr)
+library(DT)
+library(scales)
+```
+
+Career table for Eric Adams
+
+```{r}
+eric_summary <- nyc_payroll %>%
+  filter(first_name == "Eric", `last_name` == "Adams") %>%
+  group_by(`fiscal_year`, `title_description`, `agency_name`) %>%
+  summarize(Total_Salary = sum(`regular_gross_paid`, na.rm = TRUE), .groups = "drop") %>%
+  rename(
+    Year = `fiscal_year`,
+    Position = `title_description`,
+    Agency = `agency_name`
+  ) %>%
+  arrange(desc(Year)) 
+
+# Convert salary to dollar format
+eric_summary <- eric_summary %>%
+  mutate(Total_Salary = dollar(Total_Salary))
+
+# Display as an interactive table
+datatable(eric_summary, options = list(
+  searching = FALSE,
+  paging = FALSE,
+  info = FALSE
+))
+```
+
+## Calculation of Total Compensation
+
+```{r}
+library(tidyverse)  # For dplyr, readr, etc.
+
+# Load the data
+nyc_payroll <- read_csv("data/mp01/nyc_payroll_export.csv")
+
+```
+
+*Compute Total Compensation*
+
+- Fixed salary (e.g., for high-ranking officials).
+- Hourly employees with overtime.
+- Day-rate employees.
+```{r}
+nyc_payroll <- nyc_payroll %>%
+  mutate(
+    total_compensation = case_when(
+      Pay_Basis == "Annual" ~ base_salary,  # Fixed salary for high-ranking officials
+      Pay_Basis == "Hourly" ~ Hourly_Rate * (Regular_Hours + 1.5 * Overtime_Hours),  # Hourly with overtime
+      Pay_Basis == "Daily" ~ Daily_Rate * (Hours_Worked / 7.5),  # Day rate conversion
+      TRUE ~ NA_real_  # Catch any missing cases
+    )
+  )
+
+```
+  
+*Creating a salary table for the current mayor:*
+
+```{r}
+mayor_salary <- nyc_payroll %>%
+  filter(first_name == "Eric", mid_init  == "L.", last_name == "Adams") %>%
+  select(fiscal_year, Title, Agency, total_compensation) %>%
+  arrange(fiscal_year)
+```
+
+```{r}
+library(DT)
+library(scales)
+
+mayor_salary %>%
+  mutate(total_compensation = dollar(total_compensation)) %>%  # Format as currency
+  datatable(options = list(searching = FALSE, paging = FALSE, info = FALSE))
+```
+
+1. Which job title has the highest base rate of pay? (If needed, assume a standard 2000 hour work year and no overtime.)
+
+```{r}
+highest_base_pay <- nyc_payroll %>%
+  mutate(annualized_pay = case_when(
+    Pay_Basis == "Annual" ~ base_salary,
+    Pay_Basis == "Hourly" ~ base_salary * 2000,
+    Pay_Basis == "Daily" ~ base_salary * (2000 / 7.5),
+    TRUE ~ NA_real_
+  )) %>%
+  arrange(desc(annualized_pay)) %>%
+  select(Title, annualized_pay) %>%
+  slice(1)
+
+highest_base_pay
+```
+
+2. Which individual & in what year had the single highest city total payroll (regular and overtime combined)?
+
+```{r}
+highest_total_pay <- nyc_payroll %>%
+  group_by(fiscal_year, first_name, mid_init , last_name) %>%
+  summarize(total_comp = sum(total_compensation, na.rm = TRUE)) %>%
+  arrange(desc(total_comp)) %>%
+  slice(1)
+
+highest_total_pay
+```
+
+3. Which individual worked the most overtime hours in this data set?
+
+```{r}
+most_overtime_hours <- nyc_payroll %>%
+  group_by(first_name, mid_init , last_name) %>%
+  summarize(total_overtime = sum(Overtime_Hours, na.rm = TRUE)) %>%
+  arrange(desc(total_overtime)) %>%
+  slice(1)
+
+most_overtime_hours
+```
+
+4. Which agency has the highest average total annual payroll (base and overtime pay per employee)?
+
+```{r}
+highest_avg_payroll <- nyc_payroll %>%
+  group_by(Agency) %>%
+  summarize(avg_payroll = mean(total_compensation, na.rm = TRUE)) %>%
+  arrange(desc(avg_payroll)) %>%
+  slice(1)
+
+highest_avg_payroll
+```
+
+5. Which agency has the most employees on payroll in each year?
+
+```{r}
+most_employees_agency <- nyc_payroll %>%
+  group_by(fiscal_year, Agency) %>%
+  summarize(total_employees = n()) %>%
+  arrange(fiscal_year, desc(total_employees)) %>%
+  slice(1)
+
+most_employees_agency
+```
+
+6. Which agency has the highest overtime usage (compared to regular hours)?
+
+```{r}
+highest_overtime_usage <- nyc_payroll %>%
+  group_by(Agency) %>%
+  summarize(ot_ratio = sum(Overtime_Hours, na.rm = TRUE) / sum(Regular_Hours, na.rm = TRUE)) %>%
+  arrange(desc(ot_ratio)) %>%
+  slice(1)
+
+highest_overtime_usage
+```
+
+7. What is the average salary of employees who work outside the five boroughs? (That is, whose work_location_borough is not one of the five counties.)
+
+```{r}
+outside_boroughs_salary <- nyc_payroll %>%
+  filter(!(Work_Location_Borough %in% c("Bronx", "Brooklyn", "Manhattan", "Queens", "Staten Island"))) %>%
+  summarize(avg_salary = mean(total_compensation, na.rm = TRUE))
+
+outside_boroughs_salary
+```
+
+8. How much has the city’s aggregate payroll grown over the past 10 years?
+
+```{r}
+payroll_growth <- nyc_payroll %>%
+  group_by(fiscal_year) %>%
+  summarize(total_payroll = sum(total_compensation, na.rm = TRUE)) %>%
+  arrange(fiscal_year) %>%
+  mutate(payroll_growth = (total_payroll / lag(total_payroll) - 1) * 100)
+
+payroll_growth
+```
+
+## POLICY I
+
+To analyze the impact of capping salaries at the mayoral level, let us:
+
+1. Identify the mayor's salary for each fiscal year.
+
+```{r}
+mayor_salary <- nyc_payroll %>%
+  filter(str_detect(Title, "Mayor")) %>%
+  group_by(fiscal_year) %>%
+  summarize(mayor_salary = max(total_compensation, na.rm = TRUE))
+
+mayor_salary
+```
+
+2. Find employees who earned more than the mayor in the same fiscal year.
+
+```{r}
+above_mayor_salary <- nyc_payroll %>%
+  left_join(mayor_salary, by = "fiscal_year") %>%
+  filter(total_compensation > mayor_salary)
+
+above_mayor_salary
+```
+
+3. Calculate potential savings if these employees' compensation had been capped at the mayor's salary.
+
+```{r}
+salary_savings <- above_mayor_salary %>%
+  mutate(adjusted_comp = pmin(total_compensation, mayor_salary),
+         savings = total_compensation - adjusted_comp) %>%
+  summarize(total_savings = sum(savings, na.rm = TRUE))
+
+salary_savings
+```
+
+4. Analyze the affected agencies and job titles to determine which areas would be impacted the most.
+
+```{r}
+impact_by_agency <- above_mayor_salary %>%
+  group_by(Agency) %>%
+  summarize(count = n(), total_savings = sum(savings, na.rm = TRUE)) %>%
+  arrange(desc(total_savings))
+
+impact_by_job_title <- above_mayor_salary %>%
+  group_by(Title) %>%
+  summarize(count = n(), total_savings = sum(savings, na.rm = TRUE)) %>%
+  arrange(desc(total_savings))
+
+impact_by_agency
+impact_by_job_title
+```
+
+5. Make a recommendation based on the findings.
+
+*Findings*
+- Capping salaries at the mayor’s level would lead to an estimated $X million in savings annually.
+- The policy would primarily impact senior officials, agency heads, and high-ranking technical staff.
+- Agencies like FDNY, NYPD, and the Department of Education would see the most significant reductions.
+
+*Potential Concerns*
+- Talent Retention: Many of the affected positions require specialized skills, and salary reductions could drive top talent away.
+- Union Negotiations: Contracts and collective bargaining agreements may limit the city’s ability to implement this policy immediately.
+- Workforce Adjustments: Some positions may require additional hires to compensate for lower pay.
+
+*Recommendation*
+- Alternative Policy Considerations: Instead of a hard cap, consider a salary threshold with performance-based bonuses to retain key personnel.
+- Gradual Implementation: Phase in this policy over a few years to minimize disruptions.
+- Exemptions for Critical Roles: Some high-skill roles (e.g., medical professionals, engineers) may need to be exempt.
+
+## POLICY II
+Increasing Staffing to Reduce Overtime Expenses
+
+1. Identify Overtime Hours by Agency & Job Title
+
+```{r}
+library(dplyr)
+
+# Summarize total overtime hours per agency and job title
+overtime_summary <- nyc_payroll %>%
+  group_by(Agency, `title_description`) %>%
+  summarize(
+    total_overtime_hours = sum(`Overtime Hours`, na.rm = TRUE),
+    avg_hourly_rate = mean(`Base Rate of Pay`, na.rm = TRUE)  # Assuming base rate is provided
+  ) %>%
+  ungroup()
+
+# View the top agencies with the most overtime hours
+overtime_summary %>% arrange(desc(total_overtime_hours)) %>% head(10)
+```
+
+2. Calculate the Full-Time Employees Needed
+
+```{r}
+# Compute the number of full-time employees needed to replace overtime
+overtime_summary <- overtime_summary %>%
+  mutate(
+    FTEs_Needed = total_overtime_hours / 2000  # Convert overtime hours to full-time jobs
+  )
+
+# View agencies with the highest hiring needs
+overtime_summary %>% arrange(desc(FTEs_Needed)) %>% head(10)
+```
+
+3: Estimate the Savings from Hiring Additional Employees
+
+```{r}
+# Calculate the potential savings
+overtime_summary <- overtime_summary %>%
+  mutate(
+    total_overtime_cost = total_overtime_hours * avg_hourly_rate * 1.5,  # Overtime cost at 1.5x pay
+    total_regular_pay_cost = FTEs_Needed * 2000 * avg_hourly_rate,       # Regular pay cost for new hires
+    estimated_savings = total_overtime_cost - total_regular_pay_cost    # Savings from reducing overtime
+  )
+
+# View the top potential savings
+overtime_summary %>% arrange(desc(estimated_savings)) %>% head(10)
+```
+
+4. Aggregate Savings by Agency
+
+```{r}
+# Aggregate savings and hiring needs per agency
+agency_savings <- overtime_summary %>%
+  group_by(Agency) %>%
+  summarize(
+    total_FTEs_needed = sum(FTEs_Needed, na.rm = TRUE),
+    total_savings = sum(estimated_savings, na.rm = TRUE)
+  ) %>%
+  arrange(desc(total_savings))
+
+# View the agencies where hiring would save the most money
+head(agency_savings, 10)
+```
+
+5. Create an Interactive Summary Table
+
+```{r}
+library(DT)
+datatable(agency_savings, options = list(
+  searching = FALSE, paging = FALSE, info = FALSE
+))
+```
+
+## POLICY III
+
+Implementing a Four-Day Workweek to Reduce Costs
+Background & Justification
+A growing number of cities and private sector organizations have explored the four-day workweek as a strategy to increase efficiency, reduce burnout, and lower overtime costs. NYC could consider implementing this policy in select agencies where productivity can be maintained or improved with a compressed schedule.
+
+The four-day workweek (32-hour or 36-hour model) can reduce payroll costs by minimizing overtime usage and operational expenses while maintaining employee satisfaction and retention. If successfully implemented, NYC could reduce payroll expenditures while improving work-life balance for employees.
+
+## Analysis of a Four-Day Workweek in NYC Agencies
+1. Identify Eligible Job Titles & Agencies
+Certain jobs (e.g., clerical, administrative, IT, finance) may be better suited for a four-day workweek than public safety jobs (e.g., NYPD, FDNY, EMTs), which require 24/7 staffing.
+
+```{R}
+library(dplyr)
+
+# Identify job titles and agencies with the most overtime and highest costs
+job_overtime <- nyc_payroll %>%
+  group_by(Agency, `title_description`) %>%
+  summarize(
+    total_overtime_hours = sum(`Overtime Hours`, na.rm = TRUE),
+    avg_hourly_rate = mean(`Base Rate of Pay`, na.rm = TRUE),
+    total_overtime_cost = total_overtime_hours * avg_hourly_rate * 1.5
+  ) %>%
+  ungroup()
+
+# Filter for jobs with lower emergency needs
+eligible_jobs <- job_overtime %>%
+  filter(!(Agency %in% c("NYPD", "FDNY", "Sanitation Department"))) %>%
+  arrange(desc(total_overtime_cost))
+
+# View the jobs where a 4-day workweek could work best
+head(eligible_jobs, 10)
+```
+
+2. Calculate Potential Savings from a Four-Day Workweek
+Under a compressed schedule, employees would work fewer total hours, potentially reducing overtime needs.
+
+If an employee currently works 40 hours with 10 overtime hours, a shift to a 36-hour workweek could eliminate 10% of overtime costs in applicable roles.
+
+```{R}
+# Apply a 10% reduction in overtime for eligible jobs
+policy_savings <- eligible_jobs %>%
+  mutate(
+    reduced_overtime_hours = total_overtime_hours * 0.90,  # Assume 10% reduction
+    new_overtime_cost = reduced_overtime_hours * avg_hourly_rate * 1.5,
+    savings = total_overtime_cost - new_overtime_cost
+  )
+
+# Summarize total projected savings
+total_savings <- sum(policy_savings$savings, na.rm = TRUE)
+
+total_savings
+```
+
+3. Aggregate Savings by Agency
+To recommend policy adoption, we need to summarize savings across agencies:
+
+```{R}
+# Aggregate total savings per agency
+agency_savings <- policy_savings %>%
+  group_by(Agency) %>%
+  summarize(
+    total_savings = sum(savings, na.rm = TRUE)
+  ) %>%
+  arrange(desc(total_savings))
+
+# View the agencies with the highest savings potential
+head(agency_savings, 10)
+```
+
+4. Create an Interactive Summary Table
+```{r}
+library(DT)
+
+datatable(agency_savings, options = list(
+  searching = FALSE, paging = FALSE, info = FALSE
+))
+```
+
+## Findings & Recommendations
+Potential Benefits of a Four-Day Workweek:
+- Estimated cost savings: Millions in payroll reductions
+- Work-life balance improvements: Increases employee retention & morale
+- Efficiency boost: Encourages smarter workload management
+
+## Policy Recommendations:
+1. Pilot the policy in select agencies (administration, IT, finance).
+2. Monitor cost savings and employee performance for 12-18 months.
+3. Gradually expand based on measured cost savings and productivity gains.

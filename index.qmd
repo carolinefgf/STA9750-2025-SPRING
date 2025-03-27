@@ -1,5 +1,5 @@
 ---
-title: "Index Validation Report"
+title: "Caroline Website"
 ---
 
 My name is *Caroline*, 28 y/o, an student of [MS in Statistic](https://zicklin.baruch.cuny.edu/academic-programs/graduate/ms/statistics/) and I am creating a home page for testing.
